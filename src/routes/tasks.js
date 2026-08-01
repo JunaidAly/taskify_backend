@@ -1,8 +1,38 @@
 const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 const Task = require('../models/Task');
 const auth = require('../middleware/auth');
 
 const router = express.Router();
+
+const ALLOWED_IMPORT_EXTENSIONS = ['.pdf', '.doc', '.docx', '.txt'];
+const MAX_IMPORT_TASKS = 200;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_IMPORT_EXTENSIONS.includes(ext)) {
+      const err = new Error('Unsupported file type. Please upload a PDF, DOC/DOCX, or TXT file.');
+      err.statusCode = 400;
+      return cb(err);
+    }
+    cb(null, true);
+  },
+});
+
+// Splits document text into task titles, stripping common bullet/numbering markers
+function extractTaskLines(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*•‣▪]|\[\s?[xX]?\s?\]|\d+[.)]|[a-zA-Z][.)])\s+/, '').trim())
+    .filter((line) => line.length > 0 && !/^--\s*\d+\s+of\s+\d+\s*--$/i.test(line))
+    .slice(0, MAX_IMPORT_TASKS);
+}
 
 // All task routes require authentication
 router.use(auth);
@@ -53,6 +83,61 @@ router.post('/', async (req, res) => {
     res.status(201).json({ task });
   } catch (err) {
     console.error('Create task error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Import tasks from an uploaded PDF/DOC/DOCX/TXT document — each non-empty line becomes a task
+router.post('/import', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+
+    const { originalname, buffer } = req.file;
+    const ext = path.extname(originalname).toLowerCase();
+    let text = '';
+
+    try {
+      if (ext === '.pdf') {
+        const data = await pdfParse(buffer);
+        text = data.text;
+      } else if (ext === '.docx' || ext === '.doc') {
+        const result = await mammoth.extractRawText({ buffer });
+        text = result.value;
+      } else {
+        text = buffer.toString('utf-8');
+      }
+    } catch (parseErr) {
+      console.error('Document parse error:', parseErr);
+      return res.status(400).json({
+        message: 'Could not read this file. If it is a .doc file, try saving it as .docx and retry.',
+      });
+    }
+
+    const lines = extractTaskLines(text);
+    if (lines.length === 0) {
+      return res.status(400).json({ message: 'No task lines were found in this document' });
+    }
+
+    const normalizedStatus = ['pending', 'in_progress', 'completed'].includes(req.body.status)
+      ? req.body.status
+      : 'pending';
+
+    const last = await Task.findOne({ user: req.user.id, status: normalizedStatus })
+      .sort({ order: -1 })
+      .select('order');
+    let nextOrder = last ? last.order + 1 : 0;
+
+    const tasksToCreate = lines.map((title) => ({
+      user: req.user.id,
+      title: title.slice(0, 300),
+      status: normalizedStatus,
+      order: nextOrder++,
+    }));
+
+    const tasks = await Task.insertMany(tasksToCreate);
+    res.status(201).json({ tasks, count: tasks.length });
+  } catch (err) {
+    console.error('Import tasks error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
