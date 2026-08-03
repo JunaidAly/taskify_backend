@@ -11,6 +11,7 @@ API Endpoints
 - `GET /api/auth/me` (JWT)
 - `GET /api/tasks?status=&dueFrom=&dueTo=` (JWT)
 - `POST /api/tasks` { title, description?, dueDate?, status? } (JWT)
+- `POST /api/tasks/import` multipart/form-data: `file` (PDF/DOC/DOCX/TXT), `status?` — each non-empty line becomes a task (JWT)
 - `PUT /api/tasks/:id` { title?, description?, dueDate?, status? } (JWT)
 - `PATCH /api/tasks/:id/complete` (JWT)
 - `DELETE /api/tasks/:id` (JWT)
